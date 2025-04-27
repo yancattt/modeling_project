@@ -296,7 +296,6 @@ if (!is.null(real_data) && nrow(real_data) > 0) {
 # 5. Analysis of Vaccine Efficacy Scenarios
 #------------------------------------------------------
 ```{r, echo = FALSE, warning = FALSE, message = FALSE}
-
 # Function to run a simulation with specific parameters and return results
 run_simulation <- function(av_value, d_val_value, vax_start_value = 3, vax_end_value = 25) {
   # Set parameters
@@ -401,7 +400,10 @@ efficacy_summary <- data.frame(
   Final_Vaccinated_Percent = sapply(efficacy_results, function(x) x$final_vaccinated_percent)
 )
 print(efficacy_summary)
+```
 
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
 #------------------------------------------------------
 # 6. Analysis of Vaccination Rate Scenarios
 #------------------------------------------------------
@@ -444,7 +446,10 @@ vax_rate_summary <- data.frame(
   Final_Vaccinated_Percent = sapply(vax_rate_results, function(x) x$final_vaccinated_percent)
 )
 print(vax_rate_summary)
+```
 
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
 #------------------------------------------------------
 # 7. Analysis of Vaccination Timing Scenarios
 #------------------------------------------------------
@@ -486,7 +491,10 @@ timing_summary <- data.frame(
   Final_Vaccinated_Percent = sapply(timing_results, function(x) x$final_vaccinated_percent)
 )
 print(timing_summary)
+```
 
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
 #------------------------------------------------------
 # 8. Calculate Risk Ratio Between Vaccinated and Unvaccinated
 #------------------------------------------------------
@@ -501,7 +509,7 @@ final_Sv <- baseline_df$Sv[nrow(baseline_df)]
 
 # Initial susceptible populations
 initial_Su <- baseline_df$Su[1]
-initial_Sv <- baseline_df$Su[1] * 0  # Initially no vaccinated susceptibles
+initial_Sv <- 0  # Initially no vaccinated susceptibles
 
 # Calculate proportion infected in each group
 prop_infected_unvac <- 1 - (final_Su / initial_Su)
@@ -512,12 +520,23 @@ prop_infected_vac <- 1 - (final_Sv / (final_Sv + baseline_df$Lv[nrow(baseline_df
 # Risk ratio
 risk_ratio <- prop_infected_unvac / prop_infected_vac
 
+# Theoretical risk ratio calculation
+theoretical_risk_ratio <- 1 / parameters["av"]
+cat("Theoretical risk ratio (1/av):", theoretical_risk_ratio, "\n")
+
 cat("\nRisk Ratio Analysis:\n")
 cat("Proportion infected among unvaccinated:", prop_infected_unvac, "\n")
 cat("Proportion infected among vaccinated:", prop_infected_vac, "\n")
 cat("Risk of infection for unvaccinated vs vaccinated:", risk_ratio, "times higher\n")
 cat("Paper mentions this ratio is approximately 5 times higher\n")
 
+
+```
+
+
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
 #------------------------------------------------------
 # 9. Summary and Conclusions
 #------------------------------------------------------

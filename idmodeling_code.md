@@ -72,7 +72,7 @@ Parameters \#——————————————————
     ## 5                 66.53147
     ## 6                 66.57877
 
-![](idmodeling_code_files/figure-gfm/unnamed-chunk-4-2.png)<!-- -->
+![](idmodeling_code_files/figure-gfm/unnamed-chunk-5-1.png)<!-- -->
 
     ##   Vaccination_Rate_Percent Final_Infected_Percent Peak_Infected Peak_Week
     ## 1                        1              16.768115    120768.395      14.9
@@ -87,7 +87,7 @@ Parameters \#——————————————————
     ## 4                 78.42364
     ## 5                 88.87718
 
-![](idmodeling_code_files/figure-gfm/unnamed-chunk-4-3.png)<!-- -->
+![](idmodeling_code_files/figure-gfm/unnamed-chunk-6-1.png)<!-- -->
 
     ##   Start_Week Final_Infected_Percent Peak_Infected Peak_Week
     ## 1          0               4.236843      13773.56      18.3
@@ -103,6 +103,8 @@ Parameters \#——————————————————
     ## 4                 62.84366
     ## 5                 62.81005
     ## 6                 62.80015
+
+    ## Theoretical risk ratio (1/av): 4.290004
 
     ## 
     ## Risk Ratio Analysis:
