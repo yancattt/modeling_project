@@ -8,564 +8,201 @@ date: "2025-04-02"
 # Influenza SEIR Model with Vaccination - Reproducing the Valencian Community Study
 # Based on Andreu-Vilarroig et al. (2024)
 
-# Required Packages
 library(deSolve)
 library(ggplot2)
-library(gridExtra)  # For arranging multiple plots
+library(gridExtra)
+library(dplyr)
+library(tidyr)
 
 # Read the real data
 real_data <- read.csv("modeling_data.csv")
 
-
-
+# Fill in weeks 0–36 if any missing
+real_data <- real_data %>%
+  complete(week = 0:36, fill = list(
+    reported_cases = 0,
+    unvaccinated_cases = 0,
+    vaccinated_cases = 0,
+    vaccination_rate = 0
+  ))
 ```
+
 #------------------------------------------------------
-# 1. Model Definition
+
+1. Visualize Real Data
 #------------------------------------------------------
-```{r, echo = FALSE, warning = FALSE, message = FALSE}
 
-# Display the structure and first few rows
-str(real_data)
-head(real_data)
-
-# Summary of the data
-summary(real_data)
-
-# Plot reported cases
+```{r}
+# Plot reported cases by group
 ggplot(real_data, aes(x = week)) +
   geom_line(aes(y = reported_cases, color = "Total")) +
   geom_line(aes(y = unvaccinated_cases, color = "Unvaccinated")) +
   geom_line(aes(y = vaccinated_cases, color = "Vaccinated")) +
   labs(title = "Reported Influenza Cases in Valencian Community (2016-2017)",
-       x = "Week",
-       y = "Number of Cases",
-       color = "Population") +
+       x = "Week", y = "Number of Cases", color = "Population") +
   theme_minimal() +
-  scale_color_manual(values = c("Total" = "black", 
-                                "Unvaccinated" = "blue", 
-                                "Vaccinated" = "red"))
+  scale_color_manual(values = c("Total" = "black", "Unvaccinated" = "blue", "Vaccinated" = "red"))
 
-# Plot vaccination rate over time
+# Plot vaccination rate
 ggplot(real_data, aes(x = week, y = vaccination_rate)) +
   geom_line(color = "purple", size = 1) +
   labs(title = "Vaccination Rate in Valencian Community (2016-2017)",
-       x = "Week",
-       y = "Vaccination Rate (% of population)") +
+       x = "Week", y = "Vaccination Rate (% of population)") +
   theme_minimal()
 
+```
 
+#------------------------------------------------------
 
+2. SEIR Model Definition (Fixed with Week 3 Seeding)
+#------------------------------------------------------
 
-
-# Define the SEIR Model Function
+```{r}
+# SEIR model with infection seeding at week 3
 seir_model <- function(t, state, parameters) {
   with(as.list(c(state, parameters)), {
-    # Total population
+
+    # Inject infections at week 3 only
+    if (t >= 3 & t < 3.1) {
+      Iu <- Iu + 10
+      Lu <- Lu + 20
+      Su <- Su - 30
+    }
+
     N <- Su + Sv + Lu + Lv + Iu + Iv + Ru + Rv
-    
-    # Force of infection (lambda)
-    lambda <- (Iu + Iv) / N
-    
-    # Time-dependent vaccination rate delta(t)
-    # Using a piecewise function that matches the vaccination campaign
+    Itotal <- Iu + Iv
     d <- ifelse(t >= vax_start & t <= vax_end, d_val, 0)
-    
-    # Differential equations following the paper structure
-    dSu <- -b * lambda * Su - d * Su
-    dSv <- -av * b * lambda * Sv + d * Su
-    dLu <- b * lambda * Su - l * Lu
-    dLv <- av * b * lambda * Sv - l * Lv
+
+    dSu <- -b * Su * Itotal / N - d * Su
+    dSv <- -av * b * Sv * Itotal / N + d * Su
+    dLu <- b * Su * Itotal / N - l * Lu
+    dLv <- av * b * Sv * Itotal / N - l * Lv
     dIu <- l * Lu - g * Iu
     dIv <- l * Lv - g * Iv
     dRu <- g * Iu - d * Ru
     dRv <- g * Iv + d * Ru
-    
-    return(list(c(dSu, dSv, dLu, dLv, dIu, dIv, dRu, dRv)))
+    dCumInciU <- l * Lu
+    dCumInciV <- l * Lv
+
+    return(list(c(dSu, dSv, dLu, dLv, dIu, dIv, dRu, dRv,
+                  dCumInciU, dCumInciV)))
   })
 }
 
 ```
+
 #------------------------------------------------------
-# 2. Base Model Implementation with Calibrated Parameters
+
+3. Base Model Implementation
 #------------------------------------------------------
 
-```{r, echo = FALSE, warning = FALSE, message = FALSE, include = F}
+```{r}
+# Simulation timeline
+times <- seq(0, 36, by = 1/7)
 
-# Define simulation time (36 weeks to match the paper)
-times <- seq(0, 36, by = 0.1)
-
-# Define model parameters based on the paper's calibrated values
+# Parameters from the paper
 parameters <- c(
-  b = 9.1357,     # Infection rate (beta) from paper
-  av = 0.2331,    # Vaccine attenuation factor (VE = (1 - av) * 100%) from paper
-  l = 3.5,        # Latency rate per week (lambda) - 1/2 days^-1 = 7/2 weeks^-1
-  g = 1,          # Recovery rate per week (gamma) - 1/7 days^-1 = 1 week^-1
-  d_val = 0.05,   # Vaccination rate during active period
-  vax_start = 3,  # Week to start vaccination
-  vax_end = 25    # Week to end vaccination
+  b = 9.1357,
+  av = 0.2331,
+  l = 3.5,
+  g = 1,
+  d_val = 0.05,
+  vax_start = 3,
+  vax_end = 25
 )
 
-# Set initial conditions based on the Valencian Community population
-N <- 4959968    # Population of Valencian Community
-R0_percent <- 0.7711   # Initial recovered proportion (77.11% from paper)
-Iu0 <- 10       # Initial unvaccinated infected
-Iv0 <- 0        # Initial vaccinated infected (zero at start)
-Lu0 <- 20       # Initial unvaccinated latent
-Lv0 <- 0        # Initial vaccinated latent (zero at start)
-Ru0 <- R0_percent * N  # Initial unvaccinated recovered
-Rv0 <- 0        # Initial vaccinated recovered (zero at start)
-Su0 <- N - (Iu0 + Lu0 + Ru0 + Iv0 + Lv0 + Rv0) # Initial unvaccinated susceptible
-Sv0 <- 0        # Initial vaccinated susceptible (zero at start)
+# Vaccination rate function d(t) from real data
+d_vector <- real_data$vaccination_rate / 100
+d_func <- approxfun(x = 0:36, y = d_vector, rule = 2)
 
-# Initialize state vector
+# Population and initial state
+N <- 4959968
+R0_percent <- 0.7711
+Ru0 <- R0_percent * N
+Rv0 <- 0
+Iu0 <- 0
+Iv0 <- 0
+Lu0 <- 0
+Lv0 <- 0
+Su0 <- N - (Iu0 + Iv0 + Lu0 + Lv0 + Ru0 + Rv0)
+Sv0 <- 0
+
 state <- c(Su = Su0, Sv = Sv0, Lu = Lu0, Lv = Lv0,
-           Iu = Iu0, Iv = Iv0, Ru = Ru0, Rv = Rv0)
+           Iu = Iu0, Iv = Iv0, Ru = Ru0, Rv = Rv0,
+           CumInciU = 0, CumInciV = 0)
 
-# Solve the ODE System
+# Solve the model
 out <- ode(y = state, times = times, func = seir_model, parms = parameters)
 out_df <- as.data.frame(out)
 
-# Calculate additional metrics
-out_df$I_total <- out_df$Iu + out_df$Iv
-out_df$S_total <- out_df$Su + out_df$Sv
-out_df$L_total <- out_df$Lu + out_df$Lv
-out_df$R_total <- out_df$Ru + out_df$Rv
+```
 
-# Calculate reported cases (using reporting rate k from paper = 0.0702)
-k <- 0.0702     # Reporting rate from paper
-out_df$Iu_reported <- out_df$Iu * k
-out_df$Iv_reported <- out_df$Iv * k
-out_df$I_total_reported <- out_df$Iu_reported + out_df$Iv_reported
+#------------------------------------------------------
 
-# Create weekly aggregates for comparison with real data
-# Take values at weekly intervals
-weekly_indices <- which(out_df$time %% 1 == 0)
-weekly_df <- out_df[weekly_indices, ]
+4. Process Outputs & Summarize
+#------------------------------------------------------
 
-# Calculate Vaccine Efficacy
+```{r}
+# Calculate weekly incidence
+out_df <- out_df %>%
+  mutate(week = floor(time),
+         new_cases_u = c(NA, diff(CumInciU)),
+         new_cases_v = c(NA, diff(CumInciV)),
+         Iu_reported = new_cases_u * 0.0702,
+         Iv_reported = new_cases_v * 0.0702,
+         I_total_reported = Iu_reported + Iv_reported)
+
+# Take only weekly points
+weekly_df <- out_df %>%
+  filter(abs(time %% 1) < 1e-5)  # t = 0, 1, 2, ...
+
+# Vaccine Efficacy
 vaccine_efficacy <- (1 - parameters["av"]) * 100
 cat("Vaccine Efficacy (VE):", vaccine_efficacy, "%\n")
 
-# Calculate final epidemic size
-final_infected <- (out_df$Ru[nrow(out_df)] + out_df$Rv[nrow(out_df)] - Ru0 - Rv0)
+# Final epidemic size
+final_infected <- (tail(out_df$Ru, 1) + tail(out_df$Rv, 1)) - (Ru0 + Rv0)
 final_infected_percent <- final_infected / N * 100
-cat("Final epidemic size:", final_infected_percent, "% of population\n")
+cat("Final epidemic size:", round(final_infected_percent, 2), "% of population\n")
 
-# Calculate peak infection
-peak_infected <- max(out_df$I_total)
-peak_week <- out_df$time[which.max(out_df$I_total)]
-cat("Peak infected:", peak_infected, "at week", peak_week, "\n")
-
-```
-#------------------------------------------------------
-# 3. Model Visualization
-#------------------------------------------------------
-```{r, echo = FALSE, warning = FALSE, message = FALSE}
-
-# Plot the infected populations
-p1 <- ggplot() +
-  geom_line(data = out_df, aes(x = time, y = Iu, color = "Unvaccinated Infected (Iu)"), size = 1) +
-  geom_line(data = out_df, aes(x = time, y = Iv, color = "Vaccinated Infected (Iv)"), size = 1) +
-  labs(title = "Influenza Model Simulation: Infected Populations",
-       x = "Time (weeks)",
-       y = "Number of Infected Individuals",
-       color = "Population") +
-  theme_minimal() +
-  scale_color_manual(values = c("Unvaccinated Infected (Iu)" = "blue", 
-                                "Vaccinated Infected (Iv)" = "red"))
-print(p1)
-
-# Plot all model compartments
-p2 <- ggplot() +
-  geom_line(data = out_df, aes(x = time, y = Su, color = "Su"), size = 1) +
-  geom_line(data = out_df, aes(x = time, y = Sv, color = "Sv"), size = 1) +
-  geom_line(data = out_df, aes(x = time, y = Lu, color = "Lu"), size = 1) +
-  geom_line(data = out_df, aes(x = time, y = Lv, color = "Lv"), size = 1) +
-  geom_line(data = out_df, aes(x = time, y = Iu, color = "Iu"), size = 1) +
-  geom_line(data = out_df, aes(x = time, y = Iv, color = "Iv"), size = 1) +
-  geom_line(data = out_df, aes(x = time, y = Ru, color = "Ru"), size = 1) +
-  geom_line(data = out_df, aes(x = time, y = Rv, color = "Rv"), size = 1) +
-  labs(title = "Model Compartments Over Time",
-       x = "Time (weeks)",
-       y = "Population",
-       color = "Compartment") +
-  theme_minimal() +
-  scale_y_log10()  # Log scale for better visualization
-print(p2)
-
-
-#------------------------------------------------------
-# 4. Comparison with Real Data (if available)
-#------------------------------------------------------
-
-# Function to read and process real data
-load_real_data <- function() {
-  # Check if file exists
-  if (file.exists("modeling_data.csv")) {
-    real_data <- read.csv("modeling_data.csv")
-    return(real_data)
-  } else {
-    cat("Warning: modeling_data.csv not found\n")
-    return(NULL)
-  }
-}
-
-# Load real data
-real_data <- load_real_data()
-
-# Plot reported cases vs real data if available
-if (!is.null(real_data) && nrow(real_data) > 0) {
-  p3 <- ggplot() +
-    geom_line(data = weekly_df, aes(x = time, y = I_total_reported, color = "Model"), size = 1) +
-    geom_point(data = real_data, aes(x = week, y = reported_cases, color = "Real Data"), size = 3) +
-    labs(title = "Model vs Real Data: Reported Influenza Cases",
-         x = "Time (weeks)",
-         y = "Reported Cases",
-         color = "Source") +
-    theme_minimal() +
-    scale_color_manual(values = c("Model" = "blue", "Real Data" = "red"))
-  print(p3)
-  
-  # Plot unvaccinated vs vaccinated reported cases
-  if ("unvaccinated_cases" %in% colnames(real_data) && "vaccinated_cases" %in% colnames(real_data)) {
-    p4 <- ggplot() +
-      geom_line(data = weekly_df, aes(x = time, y = Iu_reported, color = "Model Unvaccinated"), size = 1) +
-      geom_line(data = weekly_df, aes(x = time, y = Iv_reported, color = "Model Vaccinated"), size = 1) +
-      geom_point(data = real_data, aes(x = week, y = unvaccinated_cases, color = "Real Unvaccinated"), size = 3) +
-      geom_point(data = real_data, aes(x = week, y = vaccinated_cases, color = "Real Vaccinated"), size = 3) +
-      labs(title = "Model vs Real Data: Vaccinated and Unvaccinated Cases",
-           x = "Time (weeks)",
-           y = "Reported Cases",
-           color = "Source") +
-      theme_minimal() +
-      scale_color_manual(values = c("Model Unvaccinated" = "blue", 
-                                   "Model Vaccinated" = "red",
-                                   "Real Unvaccinated" = "darkblue", 
-                                   "Real Vaccinated" = "darkred"))
-    print(p4)
-  }
-  
-  # Calculate R-squared to assess goodness of fit
-  calculate_rsquared <- function() {
-    # Match model data to real data weeks
-    model_data <- weekly_df$I_total_reported[1:nrow(real_data)]
-    real_values <- real_data$reported_cases
-    
-    # Calculate R-squared
-    mean_real <- mean(real_values)
-    ss_tot <- sum((real_values - mean_real)^2)
-    ss_res <- sum((real_values - model_data)^2)
-    r_squared <- 1 - (ss_res / ss_tot)
-    
-    cat("R-squared for model fit:", r_squared, "\n")
-    
-    # Also calculate for unvaccinated and vaccinated separately
-    if ("unvaccinated_cases" %in% colnames(real_data) && "vaccinated_cases" %in% colnames(real_data)) {
-      # Unvaccinated
-      model_unvacc <- weekly_df$Iu_reported[1:nrow(real_data)]
-      real_unvacc <- real_data$unvaccinated_cases
-      mean_real_unvacc <- mean(real_unvacc)
-      ss_tot_unvacc <- sum((real_unvacc - mean_real_unvacc)^2)
-      ss_res_unvacc <- sum((real_unvacc - model_unvacc)^2)
-      r_squared_unvacc <- 1 - (ss_res_unvacc / ss_tot_unvacc)
-      
-      # Vaccinated
-      model_vacc <- weekly_df$Iv_reported[1:nrow(real_data)]
-      real_vacc <- real_data$vaccinated_cases
-      mean_real_vacc <- mean(real_vacc)
-      ss_tot_vacc <- sum((real_vacc - mean_real_vacc)^2)
-      ss_res_vacc <- sum((real_vacc - model_vacc)^2)
-      r_squared_vacc <- 1 - (ss_res_vacc / ss_tot_vacc)
-      
-      cat("R-squared for unvaccinated cases:", r_squared_unvacc, "\n")
-      cat("R-squared for vaccinated cases:", r_squared_vacc, "\n")
-    }
-    
-    return(list(r_squared = r_squared, 
-                r_squared_unvacc = if(exists('r_squared_unvacc')) r_squared_unvacc else NA,
-                r_squared_vacc = if(exists('r_squared_vacc')) r_squared_vacc else NA))
-  }
-  
-  # Calculate goodness of fit
-  fit_metrics <- calculate_rsquared()
-}
+# Peak infections
+peak_infected <- max(out_df$Iu + out_df$Iv)
+peak_week <- out_df$time[which.max(out_df$Iu + out_df$Iv)]
+cat("Peak infected:", round(peak_infected), "at week", round(peak_week), "\n")
 
 ```
 
 #------------------------------------------------------
-# 5. Analysis of Vaccine Efficacy Scenarios
+
+5. Compare Model vs Real Data
 #------------------------------------------------------
-```{r, echo = FALSE, warning = FALSE, message = FALSE}
-# Function to run a simulation with specific parameters and return results
-run_simulation <- function(av_value, d_val_value, vax_start_value = 3, vax_end_value = 25) {
-  # Set parameters
-  sim_parameters <- c(
-    b = 9.1357,     # Infection rate (beta)
-    av = av_value,  # Vaccine attenuation factor
-    l = 3.5,        # Latency rate per week
-    g = 1,          # Recovery rate per week
-    d_val = d_val_value, # Vaccination rate during active period
-    vax_start = vax_start_value, # Week to start vaccination
-    vax_end = vax_end_value      # Week to end vaccination
-  )
-  
-  # Set initial conditions
-  Iu0 <- 10       # Initial unvaccinated infected
-  Iv0 <- 0        # Initial vaccinated infected
-  Lu0 <- 20       # Initial unvaccinated latent
-  Lv0 <- 0        # Initial vaccinated latent
-  Ru0 <- R0_percent * N  # Initial unvaccinated recovered
-  Rv0 <- 0        # Initial vaccinated recovered
-  Su0 <- N - (Iu0 + Lu0 + Ru0 + Iv0 + Lv0 + Rv0) # Initial unvaccinated susceptible
-  Sv0 <- 0        # Initial vaccinated susceptible
-  
-  sim_state <- c(Su = Su0, Sv = Sv0, Lu = Lu0, Lv = Lv0,
-                 Iu = Iu0, Iv = Iv0, Ru = Ru0, Rv = Rv0)
-  
-  # Solve the ODE System
-  sim_out <- ode(y = sim_state, times = times, func = seir_model, parms = sim_parameters)
-  sim_df <- as.data.frame(sim_out)
-  
-  # Calculate additional metrics
-  sim_df$I_total <- sim_df$Iu + sim_df$Iv
-  sim_df$S_total <- sim_df$Su + sim_df$Sv
-  sim_df$L_total <- sim_df$Lu + sim_df$Lv
-  sim_df$R_total <- sim_df$Ru + sim_df$Rv
-  
-  # Calculate the final epidemic size
-  final_infected <- (sim_df$Ru[nrow(sim_df)] + sim_df$Rv[nrow(sim_df)] - Ru0 - Rv0)
-  final_infected_percent <- final_infected / N * 100
-  
-  # Calculate peak infection
-  peak_infected <- max(sim_df$I_total)
-  peak_week <- sim_df$time[which.max(sim_df$I_total)]
-  
-  # Calculate vaccine coverage at the end
-  final_vaccinated <- sim_df$Sv[nrow(sim_df)] + sim_df$Lv[nrow(sim_df)] + 
-                     sim_df$Iv[nrow(sim_df)] + sim_df$Rv[nrow(sim_df)]
-  final_vaccinated_percent <- final_vaccinated / N * 100
-  
-  # Calculate vaccine efficacy
-  vaccine_efficacy <- (1 - av_value) * 100
-  
-  # Return a list with results
-  return(list(
-    out_df = sim_df,
-    final_infected = final_infected,
-    final_infected_percent = final_infected_percent,
-    peak_infected = peak_infected,
-    peak_week = peak_week,
-    final_vaccinated = final_vaccinated,
-    final_vaccinated_percent = final_vaccinated_percent,
-    vaccine_efficacy = vaccine_efficacy,
-    parameters = sim_parameters
-  ))
-}
+```{r}
+# Merge weekly model outputs with real data
+compare_df <- real_data %>%
+  left_join(weekly_df, by = "week")
 
-# Define different vaccine efficacy values to test
-efficacy_values <- c(0, 25, 50, 76.69, 90, 100)
-av_values <- 1 - (efficacy_values/100)
+ggplot(compare_df, aes(x = week)) +
+  geom_line(aes(y = unvaccinated_cases, color = "Observed Unvaccinated")) +
+  geom_line(aes(y = vaccinated_cases, color = "Observed Vaccinated")) +
+  geom_line(aes(y = Iu_reported, color = "Model Unvaccinated")) +
+  geom_line(aes(y = Iv_reported, color = "Model Vaccinated")) +
+  labs(title = "Model vs Observed Reported Cases",
+       x = "Week", y = "Reported Cases", color = "Legend") +
+  theme_minimal()
 
-# Run simulations for different vaccine efficacies
-efficacy_results <- list()
-for (i in 1:length(av_values)) {
-  efficacy_results[[i]] <- run_simulation(av_values[i], 0.05)
-}
-
-# Plot the total infected curves for different vaccine efficacies
-plot_data <- data.frame()
-for (i in 1:length(efficacy_values)) {
-  temp_df <- efficacy_results[[i]]$out_df
-  temp_df$efficacy <- paste0(efficacy_values[i], "%")
-  temp_df$scenario <- paste0("VE = ", efficacy_values[i], "%")
-  plot_data <- rbind(plot_data, temp_df[, c("time", "I_total", "efficacy", "scenario")])
-}
-
-p5 <- ggplot(plot_data, aes(x = time, y = I_total, color = scenario)) +
-  geom_line(size = 1) +
-  labs(title = "Effect of Vaccine Efficacy on Influenza Outbreak",
-       x = "Time (weeks)",
-       y = "Total Infected Population",
-       color = "Vaccine Efficacy") +
-  theme_minimal() +
-  theme(legend.position = "bottom")
-print(p5)
-
-# Create summary table of results
-efficacy_summary <- data.frame(
-  Efficacy = efficacy_values,
-  Final_Infected_Percent = sapply(efficacy_results, function(x) x$final_infected_percent),
-  Peak_Infected = sapply(efficacy_results, function(x) x$peak_infected),
-  Peak_Week = sapply(efficacy_results, function(x) x$peak_week),
-  Final_Vaccinated_Percent = sapply(efficacy_results, function(x) x$final_vaccinated_percent)
-)
-print(efficacy_summary)
 ```
-
-
-```{r, echo = FALSE, warning = FALSE, message = FALSE}
-#------------------------------------------------------
-# 6. Analysis of Vaccination Rate Scenarios
 #------------------------------------------------------
 
-# Define different vaccination rates
-vax_rates <- c(0.01, 0.03, 0.05, 0.07, 0.10)
-
-# Run simulations for different vaccination rates (using baseline efficacy)
-av_baseline <- 0.2331  # From paper (76.69% efficacy)
-vax_rate_results <- list()
-for (i in 1:length(vax_rates)) {
-  vax_rate_results[[i]] <- run_simulation(av_baseline, vax_rates[i])
-}
-
-# Plot the total infected curves for different vaccination rates
-plot_data_rates <- data.frame()
-for (i in 1:length(vax_rates)) {
-  temp_df <- vax_rate_results[[i]]$out_df
-  temp_df$vax_rate <- paste0(vax_rates[i] * 100, "%")
-  temp_df$scenario <- paste0("Vax Rate = ", vax_rates[i] * 100, "%")
-  plot_data_rates <- rbind(plot_data_rates, temp_df[, c("time", "I_total", "vax_rate", "scenario")])
-}
-
-p6 <- ggplot(plot_data_rates, aes(x = time, y = I_total, color = scenario)) +
-  geom_line(size = 1) +
-  labs(title = "Effect of Vaccination Rate on Influenza Outbreak",
-       x = "Time (weeks)",
-       y = "Total Infected Population",
-       color = "Vaccination Rate") +
-  theme_minimal() +
-  theme(legend.position = "bottom")
-print(p6)
-
-# Create summary table of vaccination rate results
-vax_rate_summary <- data.frame(
-  Vaccination_Rate_Percent = vax_rates * 100,
-  Final_Infected_Percent = sapply(vax_rate_results, function(x) x$final_infected_percent),
-  Peak_Infected = sapply(vax_rate_results, function(x) x$peak_infected),
-  Peak_Week = sapply(vax_rate_results, function(x) x$peak_week),
-  Final_Vaccinated_Percent = sapply(vax_rate_results, function(x) x$final_vaccinated_percent)
-)
-print(vax_rate_summary)
-```
-
-
-```{r, echo = FALSE, warning = FALSE, message = FALSE}
+6. Plot: Total Modeled vs Total Reported Cases
 #------------------------------------------------------
-# 7. Analysis of Vaccination Timing Scenarios
-#------------------------------------------------------
-
-# Define different vaccination start weeks
-start_weeks <- c(0, 2, 4, 6, 8, 10)
-
-# Run simulations for different vaccination start times
-timing_results <- list()
-for (i in 1:length(start_weeks)) {
-  timing_results[[i]] <- run_simulation(av_baseline, 0.05, start_weeks[i], start_weeks[i] + 20)
-}
-
-# Plot the total infected curves for different vaccination timing
-plot_data_timing <- data.frame()
-for (i in 1:length(start_weeks)) {
-  temp_df <- timing_results[[i]]$out_df
-  temp_df$start_week <- start_weeks[i]
-  temp_df$scenario <- paste0("Start Week = ", start_weeks[i])
-  plot_data_timing <- rbind(plot_data_timing, temp_df[, c("time", "I_total", "start_week", "scenario")])
-}
-
-p7 <- ggplot(plot_data_timing, aes(x = time, y = I_total, color = scenario)) +
-  geom_line(size = 1) +
-  labs(title = "Effect of Vaccination Timing on Influenza Outbreak",
-       x = "Time (weeks)",
-       y = "Total Infected Population",
-       color = "Vaccination Start Week") +
-  theme_minimal() +
-  theme(legend.position = "bottom")
-print(p7)
-
-# Create summary table of vaccination timing results
-timing_summary <- data.frame(
-  Start_Week = start_weeks,
-  Final_Infected_Percent = sapply(timing_results, function(x) x$final_infected_percent),
-  Peak_Infected = sapply(timing_results, function(x) x$peak_infected),
-  Peak_Week = sapply(timing_results, function(x) x$peak_week),
-  Final_Vaccinated_Percent = sapply(timing_results, function(x) x$final_vaccinated_percent)
-)
-print(timing_summary)
-```
-
-
-```{r, echo = FALSE, warning = FALSE, message = FALSE}
-#------------------------------------------------------
-# 8. Calculate Risk Ratio Between Vaccinated and Unvaccinated
-#------------------------------------------------------
-
-# This is mentioned in the paper: "risk of becoming infected is five times higher for an unvaccinated individual"
-baseline_results <- efficacy_results[[which(efficacy_values == 76.69)]]
-baseline_df <- baseline_results$out_df
-
-# Final susceptible populations
-final_Su <- baseline_df$Su[nrow(baseline_df)]
-final_Sv <- baseline_df$Sv[nrow(baseline_df)]
-
-# Initial susceptible populations
-initial_Su <- baseline_df$Su[1]
-initial_Sv <- 0  # Initially no vaccinated susceptibles
-
-# Calculate proportion infected in each group
-prop_infected_unvac <- 1 - (final_Su / initial_Su)
-prop_infected_vac <- 1 - (final_Sv / (final_Sv + baseline_df$Lv[nrow(baseline_df)] + 
-                                     baseline_df$Iv[nrow(baseline_df)] + 
-                                     baseline_df$Rv[nrow(baseline_df)]))
-
-# Risk ratio
-risk_ratio <- prop_infected_unvac / prop_infected_vac
-
-# Theoretical risk ratio calculation
-theoretical_risk_ratio <- 1 / parameters["av"]
-cat("Theoretical risk ratio (1/av):", theoretical_risk_ratio, "\n")
-
-cat("\nRisk Ratio Analysis:\n")
-cat("Proportion infected among unvaccinated:", prop_infected_unvac, "\n")
-cat("Proportion infected among vaccinated:", prop_infected_vac, "\n")
-cat("Risk of infection for unvaccinated vs vaccinated:", risk_ratio, "times higher\n")
-cat("Paper mentions this ratio is approximately 5 times higher\n")
-
+```{r}
 
 ```
 
 
 
 
-```{r, echo = FALSE, warning = FALSE, message = FALSE}
-#------------------------------------------------------
-# 9. Summary and Conclusions
-#------------------------------------------------------
 
-cat("\nSummary of Findings:\n")
-cat("1. Vaccine Efficacy (VE) in the model:", vaccine_efficacy, "%\n")
-cat("   (Paper calibrated value: 76.7%)\n")
-cat("2. Final epidemic size with this efficacy:", final_infected_percent, "% of population\n")
-cat("   (Paper constraint: between 5-15%)\n")
-cat("3. Risk ratio (unvaccinated vs vaccinated):", risk_ratio, "\n")
-cat("   (Paper finding: approximately 5 times higher)\n")
-cat("4. Peak infected population:", peak_infected, "individuals at week", peak_week, "\n")
-cat("5. Reporting rate:", k, "or approximately 1 reported case per", 1/k, "actual cases\n")
-cat("6. Initial recovered population:", R0_percent * 100, "% (from paper's calibration)\n")
 
-# Display key model parameters summary
-cat("\nModel Parameters Summary:\n")
-cat("Beta (infection rate):", parameters["b"], "\n")
-cat("Vaccine attenuation factor:", parameters["av"], "\n") 
-cat("Vaccine efficacy:", vaccine_efficacy, "%\n")
-cat("Latency rate:", parameters["l"], "per week\n")
-cat("Recovery rate:", parameters["g"], "per week\n")
-cat("Vaccination rate:", parameters["d_val"], "per week\n")
-cat("Reporting rate (k):", k, "\n")
 
-cat("\nVaccination Strategy Analysis:\n")
-cat("1. Higher vaccine efficacy significantly reduces both peak and final epidemic size\n")
-cat("2. Earlier vaccination timing provides better protection at the population level\n")
-cat("3. Higher vaccination rates lead to greater reductions in epidemic size\n")
-cat("4. Realistic vaccine efficacy values (~77%) still provide substantial protection\n")
 
-```
