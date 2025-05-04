@@ -1,0 +1,235 @@
+---
+title: "updated_coding_comments"
+author: "Lisa Pardee"
+date: "2025-05-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyr)
+library(dplyr)
+library(readr)
+library(tidyverse)
+library(deSolve)
+
+```
+
+#------------------------------------------------------
+
+1. Loading and Visualizaing the Real Data from Villaroig et al. 
+#------------------------------------------------------
+```{r}
+real_data = read_csv("modeling_data.csv") %>%
+  complete(week = 0:36, fill = list(
+    reported_cases = 0,
+    unvaccinated_cases = 0,
+    vaccinated_cases = 0,
+    vaccination_rate = 0
+  ))
+
+# Plot reported cases
+ggplot(real_data, aes(x = week)) +
+  geom_line(aes(y = reported_cases, color = "Total")) +
+  geom_line(aes(y = unvaccinated_cases, color = "Unvaccinated")) +
+  geom_line(aes(y = vaccinated_cases, color = "Vaccinated")) +
+  labs(title = "Reported Influenza Cases in Valencian Community (2016-2017)",
+       x = "Week", y = "Reported Cases", color = "Legend") +
+  theme_minimal()
+
+# Plot vaccination rate
+ggplot(real_data, aes(x = week, y = vaccination_rate)) +
+  geom_line(color = "purple") +
+  labs(title = "Weekly Vaccination Rate (% of Population)",
+       x = "Week", y = "Vaccination Rate (%)") +
+  theme_minimal()
+```
+#------------------------------------------------------
+
+2. Setting Parameters and the Vaccination Function
+(NOTE: i.e., the original paper did not incorporate a time-dependent proportion. We did so for our paper because we wanted to simulate the vaccination campaign which the original paper did not do)
+#------------------------------------------------------
+```{r}
+
+N <- 4959968
+beta = 9.1357
+lambda <- 3.5
+gamma <- 1
+report_rate <- 0.0702
+times <- seq(0, 36, by = 1)
+
+# Vaccination function
+d_vector <- real_data$vaccination_rate / 100
+d_func <- approxfun(x = times, y = d_vector, rule = 2)
+```
+
+#------------------------------------------------------
+
+3. Constructing the SEIR Model 
+NOTE: a deviation from the original code is that after research, we incorporated 
+seeding into our model because the paper noted that influenza cases were probably already 
+spreading prior to surveillance. So while the paper itself incorporated an additional 4 weeks before the data started (as noted in class) we decided to do this through seeding.
+We tried different values of seeding to initiate transmission. This aided in proper alignment with the real world data. All differential equtions were obtained from Villaroig. 
+#------------------------------------------------------
+```{r}
+seir_model <- function(t, state, parameters) {
+  with(as.list(c(state, parameters)), {
+    if (t >= 3 & t < 3.1) {
+      Iu <- Iu + 300
+      Lu <- Lu + 700
+      Su <- Su - 1000
+    }
+    
+    I_total <- Iu + Iv
+    dSu <- -beta * Su * I_total / N - d_func(t) * Su
+    dSv <- -a_v * beta * Sv * I_total / N + d_func(t) * Su
+    dLu <- beta * Su * I_total / N - lambda * Lu
+    dLv <- a_v * beta * Sv * I_total / N - lambda * Lv
+    dIu <- lambda * Lu - gamma * Iu
+    dIv <- lambda * Lv - gamma * Iv
+    dRu <- gamma * Iu - d_func(t) * Ru
+    dRv <- gamma * Iv + d_func(t) * Ru
+    dCumIncU <- lambda * Lu
+    dCumIncV <- lambda * Lv
+    
+    return(list(c(dSu, dSv, dLu, dLv, dIu, dIv, dRu, dRv, dCumIncU, dCumIncV)))
+  })
+}
+```
+
+
+#------------------------------------------------------
+
+4. Used a cost function to evaluate the model fit. Villaroig tested different parameters for beta, vaccine attenuation facotr (av), and R0. 
+#------------------------------------------------------
+
+```{r}
+cost_function <- function(par) {
+  beta <- par[1]
+  a_v <- par[2]
+  R0_prop <- par[3]
+  R0 <- R0_prop * N
+  
+  init <- c(
+    Su = N - R0, Sv = 0,
+    Lu = 0, Lv = 0,
+    Iu = 0, Iv = 0,
+    Ru = R0, Rv = 0,
+    CumIncU = 0, CumIncV = 0
+  )
+  
+  out <- ode(y = init, times = times, func = seir_model, parms = list(beta = beta, a_v = a_v))
+  out_df <- as.data.frame(out)
+  
+  out_df <- out_df %>%
+    mutate(week = time,
+           new_inf_unvacc = c(NA, diff(CumIncU)),
+           new_inf_vacc = c(NA, diff(CumIncV))) %>%
+    filter(!is.na(new_inf_unvacc)) %>%
+    mutate(
+      reported_unvacc = new_inf_unvacc * report_rate,
+      reported_vacc = new_inf_vacc * report_rate
+    )
+  
+  merged <- left_join(real_data, out_df, by = "week")
+  
+  sse <- sum((merged$unvaccinated_cases - merged$reported_unvacc)^2, na.rm = TRUE) +
+    sum((merged$vaccinated_cases - merged$reported_vacc)^2, na.rm = TRUE)
+  
+  return(sse)
+}
+
+```
+
+
+#------------------------------------------------------
+
+5. Performed optimization. The values for the initial guess are based on a table 
+provided by Villaroig et al. that determined ideal ranges for optimal calibration. these values for beta, av, and R0 were in the range of optimal values 
+#------------------------------------------------------
+
+```{r}
+initial_guess <- c(9, 0.24, 0.77)
+
+fit <- optim(par = initial_guess, fn = cost_function,
+             method = "L-BFGS-B",
+             lower = c(0.1, 0.01, 0.01),
+             upper = c(15, 1, 1))
+
+best_params <- fit$par
+beta <- best_params[1]
+a_v <- best_params[2]
+R0 <- best_params[3] * N
+
+cat("Best beta:", beta, "\n")
+cat("Best a_v:", a_v, "\n")
+cat("Best R0 proportion:", best_params[3], "\n")
+```
+
+
+#------------------------------------------------------
+
+6. Running the simulation again with the optimal parameters 
+#------------------------------------------------------
+
+```{r}
+init <- c(
+  Su = N - R0, Sv = 0,
+  Lu = 0, Lv = 0,
+  Iu = 0, Iv = 0,
+  Ru = R0, Rv = 0,
+  CumIncU = 0, CumIncV = 0
+)
+
+out <- ode(y = init, times = times, func = seir_model, parms = list(beta = beta, a_v = a_v))
+out_df <- as.data.frame(out)
+
+out_df <- out_df %>%
+  mutate(week = time,
+         new_inf_unvacc = c(NA, diff(CumIncU)),
+         new_inf_vacc = c(NA, diff(CumIncV))) %>%
+  filter(!is.na(new_inf_unvacc)) %>%
+  mutate(
+    reported_unvacc = new_inf_unvacc * report_rate,
+    reported_vacc = new_inf_vacc * report_rate
+  )
+```
+
+# ------------------------------------------------------
+# 7. Summary Statistics
+# ------------------------------------------------------
+
+```{r}
+VE <- (1 - a_v) * 100
+cat("Vaccine Efficacy (VE):", round(VE, 2), "%\n")
+
+final_recovered <- tail(out_df$Ru + out_df$Rv, 1)
+final_infected <- final_recovered - R0
+final_infected_percent <- final_infected / N * 100
+cat("Final epidemic size:", round(final_infected_percent, 2), "% of population\n")
+
+out_df$I_total <- out_df$Iu + out_df$Iv
+peak_infected <- max(out_df$I_total)
+peak_week <- out_df$week[which.max(out_df$I_total)]
+cat("Peak infected:", round(peak_infected), "at week", peak_week, "\n")
+```
+
+# ------------------------------------------------------
+# 8. Plot Model vs Observed Data
+# ------------------------------------------------------
+
+```{r}
+plot_df <- real_data %>%
+  left_join(out_df, by = "week")
+
+ggplot(plot_df, aes(x = week)) +
+  geom_line(aes(y = unvaccinated_cases, color = "Observed Unvaccinated")) +
+  geom_line(aes(y = vaccinated_cases, color = "Observed Vaccinated")) +
+  geom_line(aes(y = reported_unvacc, color = "Model Unvaccinated")) +
+  geom_line(aes(y = reported_vacc, color = "Model Vaccinated")) +
+  labs(title = "Model vs Observed Reported Cases (Calibrated)",
+       x = "Week", y = "Reported Cases", color = "Legend") +
+  theme_minimal()
+```
+
+
